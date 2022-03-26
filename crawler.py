@@ -12,6 +12,7 @@ from bs4 import BeautifulSoup
 from crawl_config import NEWSPAPER_CONFIG_SELECTOR
 from urllib.parse import urljoin, urlparse
 import json
+from datetime import datetime
 # Create a custom logger
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -51,15 +52,20 @@ class Database:
             os.makedirs(save_dir)
         self.use_selenium = use_selenium
         self.config = config
-        self.urls_to_crawl = queue.Queue(maxsize=queue_max_size)
+        # Using low values can cause deadlock
+        self.urls_to_crawl = queue.Queue(maxsize=0)
         self.urls_seen = set()
         self.webpages_to_analyze = queue.Queue(maxsize=queue_max_size)
         self.save_json_lock = threading.Lock()
+        self.download_lock = threading.Lock()
+        self.parsed_lock = threading.Lock()
         self.file_name = save_dir  + os.sep + 'crawled_pages.json'
         self.counter = 1
         self.forbidden_sub_urls = config['forbidden_url']
         self.event = threading.Event()
         self.event.set()
+        self.total_downloaded = 0
+        self.total_parsed = 0
         if resume:
             pass 
             # to be implemented
@@ -103,9 +109,17 @@ class Database:
     def webpage_queue_empty(self):
         return self.webpages_to_analyze.empty()
 
+    def inc_download(self):
+        with self.download_lock:
+            self.total_downloaded += 1
+            return self.total_downloaded
+
+    def inc_parsed(self):
+        with self.parsed_lock:
+            self.total_parsed += 1
+            return self.total_parsed
 
 def extractor(database : Database):
-    total_parsed = 0
     logger.info("Extractor started")
     while not database.event.set() or not database.webpage_queue_empty():
         try:
@@ -138,11 +152,17 @@ def extractor(database : Database):
                     return text.encode('ascii', 'ignore').decode('ascii')
                 created_at = soup.select( database.config['created_at'] )[0].get_text().strip()
                 created_at = to_utf8(created_at)
+                python_time = datetime.strptime( created_at, '%d %B, %Y, %I:%M %p' )
+                created_at = python_time.strftime( '%Y-%m-%dT%I:%M:%S') + '+06:00'
                 title = soup.select( database.config['title'] )[0].get_text().strip()
                 title = to_utf8(title)
                 description = soup.select( database.config['description'] )[0].get_text().strip()
                 description = to_utf8(description)
-                image = soup.select( database.config['image'] )[0]['data-src']
+                try:
+                    image = soup.select( database.config['image'] )[0]['data-src']
+                except Exception as e:
+                    image = 'https://www.pngkit.com/png/detail/357-3579363_business-standard-business-standard-logo-png.png'
+                    logger.exception(e)
                 image = urljoin(image, urlparse(image).path)
                 image = to_utf8(image)
                 logger.debug(f"\ncreated_at: {created_at}\ntitle: {title}\ndescription: {description[:20]}...\nimage: {image}")
@@ -154,8 +174,8 @@ def extractor(database : Database):
                         "image": image,
                     }
                 )
-                total_parsed += 1
-                logger.info(f"Total Parsed News: {total_parsed}")
+                val = database.inc_parsed()
+                logger.info(f"Total Parsed News: {val}")
             except Exception as e:
                 logger.exception(e)
             logger.info(f"Parsed url: {page.url}")
@@ -166,7 +186,6 @@ def extractor(database : Database):
 
 
 def downloader(database : Database):
-    total_downloaded = 0
     logger.info("Downloader started")
     while not database.event.set() or not database.url_queue_empty():
         try:
@@ -178,8 +197,8 @@ def downloader(database : Database):
             else:
                 page = requests.get(url)
             assert page.status_code == 200, f"Status code is {page.status_code}"
-            total_downloaded += 1
-            logger.info( f"Downloaded url: {url}, Total Downloaded: {total_downloaded}")
+            val = database.inc_download()
+            logger.info( f"Downloaded url: {url}, Total Downloaded: {val}")
             database.put_webpage(page)
         except Exception as e:
             logger.exception(e)
@@ -189,13 +208,13 @@ def downloader(database : Database):
 
 if __name__ == "__main__":
     config_logger()
-
+    worker = 2*6
     database = Database( config= NEWSPAPER_CONFIG_SELECTOR['tbsnews'], save_dir= '.' + os.sep + 'crawl', use_selenium = False)
     logger.info("Crawling started")
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-        
-        executor.submit(downloader, database )
-        executor.submit(extractor, database)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=worker) as executor:
+        for i in range(worker//2):
+            executor.submit(downloader, database )
+            executor.submit(extractor, database)
         
 
