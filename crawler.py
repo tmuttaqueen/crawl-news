@@ -169,6 +169,7 @@ def extractor(database : Database):
                 database.save_json(
                     {
                         "created_at": created_at,
+                        "url": page.url,
                         "title": title,
                         "description": description,
                         "image": image,
@@ -208,7 +209,7 @@ def downloader(database : Database):
 
 if __name__ == "__main__":
     config_logger()
-    worker = 2*6
+    worker = 2*12
     database = Database( config= NEWSPAPER_CONFIG_SELECTOR['tbsnews'], save_dir= '.' + os.sep + 'crawl', use_selenium = False)
     logger.info("Crawling started")
 
